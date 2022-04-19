@@ -31,6 +31,8 @@ class RandomAnisotropy(RandomTransform):
         scalars_only: Apply only to instances of :class:`torchio.ScalarImage`.
             This is useful when the segmentation quality needs to be kept,
             as in `Billot et al. <https://link.springer.com/chapter/10.1007/978-3-030-59728-3_18>`_.
+        anti_aliasing: Use an anti-aliasing filter before resampling. See
+            :class:`~torchio.transforms.Resample`.
         **kwargs: See :class:`~torchio.transforms.Transform` for additional
             keyword arguments.
 
@@ -51,7 +53,8 @@ class RandomAnisotropy(RandomTransform):
             downsampling: TypeRangeFloat = (1.5, 5),
             image_interpolation: str = 'linear',
             scalars_only: bool = True,
-            **kwargs
+            anti_aliasing: bool = False,
+            **kwargs,
             ):
         super().__init__(**kwargs)
         self.axes = self.parse_axes(axes)
@@ -60,6 +63,7 @@ class RandomAnisotropy(RandomTransform):
         parsed_interpolation = self.parse_interpolation(image_interpolation)
         self.image_interpolation = parsed_interpolation
         self.scalars_only = scalars_only
+        self.anti_aliasing = anti_aliasing
 
     def get_params(
             self,
@@ -96,8 +100,9 @@ class RandomAnisotropy(RandomTransform):
         target_spacing[axis] *= downsampling
 
         arguments = {
-            'image_interpolation': 'nearest',
+            'image_interpolation': self.image_interpolation, # 'nearest',  TODO  ################## is nearest faster???
             'scalars_only': self.scalars_only,
+            'anti_aliasing': self.anti_aliasing,
         }
 
         downsample = Resample(

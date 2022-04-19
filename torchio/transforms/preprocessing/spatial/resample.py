@@ -45,8 +45,17 @@ class Resample(SpatialTransform):
         label_interpolation: See :ref:`Interpolation`.
         scalars_only: Apply only to instances of :class:`~torchio.ScalarImage`.
             Used internally by :class:`~torchio.transforms.RandomAnisotropy`.
+        anti_aliasing: If ``True``, the input will be low-pass filtered along
+            downsampled dimensions to remove aliasing by respect the
+            `Nyquist–Shannon sampling theorem`_. The filter is applied using
+            :class:`~torchio.transforms.RandomBlur`. See `Cardoso et al. 2015`_
+            for the theory behind this operation.
         **kwargs: See :class:`~torchio.transforms.Transform` for additional
             keyword arguments.
+
+    .. _Cardoso et al. 2015: https://link.springer.com/chapter/10.1007/978-3-319-24571-3_81
+
+    .. _Nyquist–Shannon sampling theorem: https://en.wikipedia.org/wiki/Nyquist%E2%80%93Shannon_sampling_theorem
 
     Example:
         >>> import torch
@@ -79,7 +88,8 @@ class Resample(SpatialTransform):
             label_interpolation: str = 'nearest',
             pre_affine_name: Optional[str] = None,
             scalars_only: bool = False,
-            **kwargs
+            anti_aliasing: bool = False,
+            **kwargs,
             ):
         super().__init__(**kwargs)
         self.target = target
@@ -89,12 +99,14 @@ class Resample(SpatialTransform):
             label_interpolation)
         self.pre_affine_name = pre_affine_name
         self.scalars_only = scalars_only
+        self.anti_aliasing = anti_aliasing
         self.args_names = (
             'target',
             'image_interpolation',
             'label_interpolation',
             'pre_affine_name',
             'scalars_only',
+            'anti_aliasing',
         )
 
     @staticmethod
@@ -185,18 +197,48 @@ class Resample(SpatialTransform):
 
             resampler = sitk.ResampleImageFilter()
             resampler.SetInterpolator(interpolator)
-            self._set_resampler_reference(
+            target_is_spacing = self._set_resampler_reference(
                 resampler,
                 self.target,
                 floating_sitk,
                 subject,
             )
+            if self.anti_aliasing:
+                if not target_is_spacing:
+                    message = (
+                        'Anti-aliasing is only supported when the target is'
+                        ' an image spacing, but the following value was passed'
+                        f' for target: {self.target}'
+                    )
+                    raise NotImplementedError(message)
+                floating_spacing = np.array(floating_sitk.GetSpacing())
+                target_spacing = np.array(resampler.GetOutputSpacing())
+                downsampling_factors = target_spacing / floating_spacing
+                is_downsampling = np.any(downsampling_factors > 1)
+                if is_downsampling:
+                    floating_sitk = self._do_antialiasing(
+                        floating_sitk,
+                        downsampling_factors,
+                    )
             resampled = resampler.Execute(floating_sitk)
 
             array, affine = sitk_to_nib(resampled)
             image.set_data(torch.as_tensor(array))
             image.affine = affine
         return subject
+
+    def _do_antialiasing(
+            self,
+            image: sitk.Image,
+            downsampling_factors: np.ndarray,
+            ) -> sitk.Image:
+        variances_physical = [
+            self.get_sigma(down, spacing) ** 2
+            if down > 1
+            else 0
+            for down, spacing in zip(downsampling_factors, image.GetSpacing())
+        ]
+        return sitk.DiscreteGaussian(image, variances_physical)
 
     def _set_resampler_reference(
             self,
@@ -213,6 +255,7 @@ class Resample(SpatialTransform):
         # 4) A number or sequence of numbers for spacing
         # 5) A tuple of shape, affine
         # The fourth case is the different one
+        target_is_spacing = False
         if isinstance(target, (str, Path, Image)):
             if isinstance(target, Image):
                 # It's a TorchIO image
@@ -238,6 +281,7 @@ class Resample(SpatialTransform):
             )
         elif isinstance(target, Number):  # one number for target was passed
             self._set_resampler_from_spacing(resampler, target, floating_sitk)
+            target_is_spacing = True
         elif isinstance(target, Iterable) and len(target) == 2:
             shape, affine = target
             if not (isinstance(shape, Iterable) and len(shape) == 3):
@@ -259,8 +303,10 @@ class Resample(SpatialTransform):
             )
         elif isinstance(target, Iterable) and len(target) == 3:
             self._set_resampler_from_spacing(resampler, target, floating_sitk)
+            target_is_spacing = True
         else:
             raise RuntimeError(f'Target not understood: "{target}"')
+        return target_is_spacing
 
     def _set_resampler_from_shape_affine(self, resampler, shape, affine):
         origin, spacing, direction = get_sitk_metadata_from_ras_affine(affine)
@@ -271,11 +317,11 @@ class Resample(SpatialTransform):
 
     def _set_resampler_from_spacing(self, resampler, target, floating_sitk):
         target_spacing = self._parse_spacing(target)
-        reference_image = self.get_reference_image(
+        reference_sitk = self.get_reference_image(
             floating_sitk,
             target_spacing,
         )
-        resampler.SetReferenceImage(reference_image)
+        resampler.SetReferenceImage(reference_sitk)
 
     @staticmethod
     def get_reference_image(
@@ -306,7 +352,13 @@ class Resample(SpatialTransform):
         """Compute optimal standard deviation for Gaussian kernel.
 
         From Cardoso et al., "Scale factor point spread function matching:
-        beyond aliasing in image resampling", MICCAI 2015
+        beyond aliasing in image resampling", MICCAI 2015.
+
+        Args:
+            downsampling_factor: Array or number representing the ratio between
+                output and input spacing.
+            spacing: Spacing of the input image that will be downsampled. The
+                length must match that of the downsampling factor.
         """
         k = downsampling_factor
         variance = (k ** 2 - 1 ** 2) * (2 * np.sqrt(2 * np.log(2))) ** (-2)

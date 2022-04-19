@@ -25,15 +25,20 @@ class Resize(SpatialTransform):
         target_shape: Tuple :math:`(W, H, D)`. If a single value :math:`N` is
             provided, then :math:`W = H = D = N`. The size of dimensions set to
             -1 will be kept.
+        anti_aliasing: Use an anti-aliasing filter before resampling. See
+            :class:`~torchio.transforms.Resample`.
         image_interpolation: See :ref:`Interpolation`.
         label_interpolation: See :ref:`Interpolation`.
+        **kwargs: See :class:`~torchio.transforms.Transform` for additional
+            keyword arguments.
     """
     def __init__(
             self,
             target_shape: TypeSpatialShape,
             image_interpolation: str = 'linear',
             label_interpolation: str = 'nearest',
-            **kwargs
+            anti_aliasing: bool = False,
+            **kwargs,
             ):
         super().__init__(**kwargs)
         self.target_shape = np.asarray(to_tuple(target_shape, length=3))
@@ -41,10 +46,12 @@ class Resize(SpatialTransform):
             image_interpolation)
         self.label_interpolation = self.parse_interpolation(
             label_interpolation)
+        self.anti_aliasing = anti_aliasing
         self.args_names = (
             'target_shape',
             'image_interpolation',
             'label_interpolation',
+            'anti_aliasing',
         )
 
     def apply_transform(self, subject: Subject) -> Subject:
@@ -58,6 +65,7 @@ class Resize(SpatialTransform):
             spacing_out,
             image_interpolation=self.image_interpolation,
             label_interpolation=self.label_interpolation,
+            anti_aliasing=self.anti_aliasing,
         )
         resampled = resample(subject)
         # Sometimes, the output shape is one voxel too large
